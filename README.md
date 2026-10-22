@@ -1,1 +1,31 @@
-# molnet
+## molnet
+
+It reads `DEVIN_API_KEY`, `DEVIN_ORG_ID` and, optionally, `DEVIN_API_URL` from the environment.
+
+```sh
+bun src/molnet.ts spawn "Fix the failing tests" --max-acu-limit 5
+bun src/molnet.ts spawn "Refactor the parser" --devin-mode fast
+bun src/molnet.ts spawn -- "-starts with a dash"
+bun src/molnet.ts --help          # list commands
+bun src/molnet.ts spawn --help    # spawn options
+```
+
+### `spawn`
+
+Creates a Devin session and prints one line of JSON: `{"session_id": "...", "url": "...", "status": "..."}`. Options you leave out are not sent, so API and organization defaults apply.
+
+| Option | API field |
+| - | - |
+| `<prompt>`: required positional argument. Quote it, because more than one positional argument is an error. Put `--` before a prompt that starts with `-`. | `prompt` |
+| `--max-acu-limit <n>` (positive integer) | `max_acu_limit` |
+| `--devin-mode <mode>` (checked locally against known modes) | `devin_mode` |
+
+It also runs with `node src/molnet.ts ...`. Running `bun link` installs it as `molnet` on your PATH. The exit code is 0 on success. Invalid arguments, API errors and missing credentials print `molnet: <message>` to stderr and exit 1. To add a command, add an entry to `commands` in `src/molnet.ts`.
+
+## Development
+
+```sh
+bun install
+bun test
+bun run typecheck
+```

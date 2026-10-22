@@ -1,0 +1,22 @@
+{
+  "name": "devin-sessions-client-ts",
+  "version": "0.1.0",
+  "description": "Minimal TypeScript client for the Devin API v3 organization session endpoints",
+  "type": "module",
+  "private": true,
+  "module": "src/devin.ts",
+  "bin": {
+    "molnet": "src/molnet.ts"
+  },
+  "exports": {
+    ".": "./src/devin.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "typescript": "^7.0.2"
+  }
+}
