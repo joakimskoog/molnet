@@ -1,4 +1,6 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
+import { toState, cloudAgentStatus } from "./src/molnet";
+import type { Session, SessionStatus, SessionStatusDetail } from "./src/types";
 
 type Request = { method: string; path: string; auth: string | null; body: any };
 let requests: Request[] = [];
@@ -103,4 +105,105 @@ test("missing or unknown command prints usage to stderr and exits 1", async () =
     expect(stderr).toContain("Usage: molnet <command>");
     expect(exitCode).toBe(1);
   }
+});
+
+const limits: SessionStatusDetail[] = [
+  "usage_limit_exceeded",
+  "out_of_credits",
+  "out_of_quota",
+  "no_quota_allocation",
+  "payment_declined",
+  "org_usage_limit_exceeded",
+  "user_usage_limit_exceeded",
+  "total_session_limit_exceeded",
+  "contract_expired",
+  "error",
+];
+
+const idle: SessionStatusDetail[] = ["waiting_for_user", "waiting_for_approval", "finished"];
+
+test("toState follows the mapping table", () => {
+  expect(toState("running", null)).toBe("working");
+  expect(toState("running", "working")).toBe("working");
+  for (const detail of idle) {
+    expect(toState("running", detail)).toBe("idle");
+  }
+  expect(toState("suspended", "inactivity")).toBe("idle");
+  expect(toState("suspended", "user_request")).toBe("idle");
+  for (const detail of limits) {
+    expect(toState("suspended", detail)).toBe("failed");
+  }
+});
+
+test("new, claimed, resuming, error and exit map on status alone", () => {
+  const details: (SessionStatusDetail | null)[] = [null, "working", "finished", "waiting_for_user", "inactivity", "out_of_credits", "error"];
+  details.push("daydreaming" as SessionStatusDetail); // outside the union
+  const working: SessionStatus[] = ["new", "claimed", "resuming"];
+  const failed: SessionStatus[] = ["error", "exit"];
+  for (const detail of details) {
+    for (const status of working) expect(toState(status, detail)).toBe("working");
+    for (const status of failed) expect(toState(status, detail)).toBe("failed");
+  }
+});
+
+test("a missing status_detail is treated as null", () => {
+  expect(toState("running", undefined)).toBe("working");
+  expect(() => toState("suspended", undefined)).toThrow("unrecognized session status suspended/null");
+});
+
+test("toState throws on combinations outside the table", () => {
+  const cases: [unknown, unknown, string][] = [
+    ["running", "inactivity", "running/inactivity"],
+    ["running", "out_of_credits", "running/out_of_credits"],
+    ["suspended", null, "suspended/null"],
+    ["suspended", "working", "suspended/working"],
+    ["sleeping", null, "sleeping/null"],
+    ["running", "daydreaming", "running/daydreaming"],
+    ["suspended", "daydreaming", "suspended/daydreaming"],
+    ["constructor", null, "constructor/null"],
+    ["__proto__", null, "__proto__/null"],
+    ["suspended", "constructor", "suspended/constructor"],
+    ["suspended", "toString", "suspended/toString"],
+    [undefined, null, "undefined/null"],
+    [42, null, "42/null"],
+  ];
+  for (const [status, detail, text] of cases) {
+    expect(() => toState(status as SessionStatus, detail as SessionStatusDetail)).toThrow(new Error(`unrecognized session status ${text}`));
+  }
+});
+
+const session: Session = {
+  session_id: "devin-1",
+  url: "https://app.devin.ai/sessions/devin-1",
+  status: "suspended",
+  status_detail: "out_of_credits",
+  tags: ["x"],
+  org_id: "org-1",
+  created_at: 1,
+  updated_at: 2,
+  acus_consumed: 3,
+  pull_requests: [
+    { pr_url: "https://github.com/a/b/pull/12", pr_state: "open" },
+    { pr_url: "https://github.com/a/b/pull/13", pr_state: null },
+  ],
+};
+
+test("cloudAgentStatus has exactly three keys, in order", () => {
+  const result = cloudAgentStatus(session);
+  expect(Object.keys(result)).toEqual(["session_id", "state", "pull_requests"]);
+  expect(JSON.stringify(result)).toBe(
+    '{"session_id":"devin-1","state":"failed","pull_requests":["https://github.com/a/b/pull/12","https://github.com/a/b/pull/13"]}',
+  );
+});
+
+test("cloudAgentStatus keeps every key when there is nothing to report", () => {
+  const { status_detail, ...rest } = session;
+  const result = cloudAgentStatus({ ...rest, status: "running", pull_requests: [] });
+  expect(JSON.stringify(result)).toBe('{"session_id":"devin-1","state":"working","pull_requests":[]}');
+});
+
+test("cloudAgentStatus throws on an unrecognized status", () => {
+  expect(() => cloudAgentStatus({ ...session, status: "running", status_detail: "inactivity" })).toThrow(
+    "unrecognized session status running/inactivity",
+  );
 });
