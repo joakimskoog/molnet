@@ -69,6 +69,15 @@ Options:
   --devin-mode <mode>           ${devinModes.join(", ")}
   -h, --help                    Show this help`;
 
+const statusUsage = `Usage: molnet status <id>...
+
+Prints one JSON line per session: {"session_id","state","pull_requests"}.
+Lines follow the order of the ids; a repeated id is printed once.
+Fails with nothing on stdout if any lookup fails.
+
+Options:
+  -h, --help                    Show this help`;
+
 const commands: Record<string, Command> = {
   spawn: async (args) => {
     const { values, positionals } = parseArgs({
@@ -104,6 +113,25 @@ const commands: Record<string, Command> = {
       devin_mode: devinMode,
     });
     console.log(JSON.stringify({ session_id: session.session_id, url: session.url, status: session.status }));
+  },
+  status: async (args) => {
+    const { values, positionals } = parseArgs({
+      args,
+      allowPositionals: true,
+      options: { help: { type: "boolean", short: "h" } },
+    });
+    if (values.help) return console.log(statusUsage);
+
+    if (positionals.length === 0) throw new Error("status requires at least one session id");
+    if (positionals.some((id) => !id.trim())) throw new Error("session id is empty");
+    const ids = [...new Set(positionals)];
+
+    const client = createDevinSessionsClient();
+    const sessions = await Promise.all(ids.map((id) => client.getSession(id)));
+
+    // Build every line before printing, so one unrecognized status leaves stdout empty.
+    const lines = sessions.map((session) => JSON.stringify(cloudAgentStatus(session)));
+    console.log(lines.join("\n"));
   },
 };
 

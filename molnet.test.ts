@@ -6,11 +6,36 @@ type Request = { method: string; path: string; auth: string | null; body: any };
 let requests: Request[] = [];
 beforeEach(() => (requests = []));
 
+function fakeSession(id: string, status: string, status_detail: string | null, prs: string[] = []) {
+  return {
+    session_id: id,
+    url: `https://app.devin.ai/sessions/${id}`,
+    status,
+    status_detail,
+    pull_requests: prs.map((pr_url) => ({ pr_url, pr_state: "open" })),
+  };
+}
+
+// Sessions served by GET /v3/organizations/org-test/sessions/<id>; any other id is a 403, as the real API answers.
+const fakeSessions: Record<string, () => Response> = {
+  "s-working": () => Response.json(fakeSession("s-working", "running", "working")),
+  "s-idle": () => Response.json(fakeSession("s-idle", "running", "finished", ["https://github.com/a/b/pull/1"])),
+  "s-failed": () => Response.json(fakeSession("s-failed", "suspended", "out_of_credits")),
+  "s-500": () => new Response("boom", { status: 500 }),
+  "s-weird": () => Response.json(fakeSession("s-weird", "sleeping", null)),
+};
+
 const server = Bun.serve({
   port: 0,
   async fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (req.method === "GET") {
+      requests.push({ method: req.method, path, auth: req.headers.get("authorization"), body: null });
+      const id = path.slice("/v3/organizations/org-test/sessions/".length);
+      return fakeSessions[id]?.() ?? Response.json({ type: "about:blank", title: "Forbidden", status: 403, detail: "Unauthorized", instance: path }, { status: 403 });
+    }
     const body: any = await req.json();
-    requests.push({ method: req.method, path: new URL(req.url).pathname, auth: req.headers.get("authorization"), body });
+    requests.push({ method: req.method, path, auth: req.headers.get("authorization"), body });
     if (body.prompt === "fail") return new Response("nope", { status: 403 });
     return Response.json({ session_id: "abc", url: "https://app.devin.ai/sessions/abc", status: "new", title: "ignored" });
   },
@@ -84,6 +109,77 @@ test("spawn reports API errors and missing credentials", async () => {
   const noKey = await molnet(["spawn", "x"], { DEVIN_API_KEY: "" });
   expect(noKey.stderr).toContain("Missing apiKey");
   expect(noKey.exitCode).toBe(1);
+});
+
+const sessionPath = (id: string) => `/v3/organizations/org-test/sessions/${id}`;
+
+test("status <id> prints one status line", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["status", "s-idle"]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  expect(stdout).toBe('{"session_id":"s-idle","state":"idle","pull_requests":["https://github.com/a/b/pull/1"]}\n');
+  expect(requests).toEqual([{ method: "GET", path: sessionPath("s-idle"), auth: "Bearer cog_test", body: null }]);
+});
+
+test("status prints lines in argument order, with a repeated id printed and fetched once", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["status", "s-failed", "s-working", "s-failed", "s-idle", "s-working"]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  expect(stdout.trimEnd().split("\n").map((line) => JSON.parse(line))).toEqual([
+    { session_id: "s-failed", state: "failed", pull_requests: [] },
+    { session_id: "s-working", state: "working", pull_requests: [] },
+    { session_id: "s-idle", state: "idle", pull_requests: ["https://github.com/a/b/pull/1"] },
+  ]);
+  expect(requests.map((r) => r.path).sort()).toEqual(["s-failed", "s-idle", "s-working"].map(sessionPath));
+});
+
+test("status fails with nothing on stdout if any id is unknown", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["status", "s-idle", "nope-1", "s-working"]);
+  expect(stdout).toBe("");
+  expect(stderr).toContain("failed with 403");
+  expect(exitCode).toBe(1);
+});
+
+test("status rejects a blank id without calling the API", async () => {
+  for (const id of ["", "  "]) {
+    const { stdout, stderr, exitCode } = await molnet(["status", "s-idle", id]);
+    expect(stdout).toBe("");
+    expect(stderr).toBe("molnet: session id is empty\n");
+    expect(exitCode).toBe(1);
+  }
+  expect(requests).toEqual([]);
+});
+
+test("status fails with nothing on stdout on another API error", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["status", "s-idle", "s-500"]);
+  expect(stdout).toBe("");
+  expect(stderr).toContain("molnet: GET");
+  expect(stderr).toContain("failed with 500: boom");
+  expect(exitCode).toBe(1);
+});
+
+test("status prints nothing if any session has an unrecognized status", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["status", "s-idle", "s-weird"]);
+  expect(stdout).toBe("");
+  expect(stderr).toBe("molnet: unrecognized session status sleeping/null\n");
+  expect(exitCode).toBe(1);
+});
+
+test("status without ids fails without calling the API", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["status"]);
+  expect(stdout).toBe("");
+  expect(stderr).toBe("molnet: status requires at least one session id\n");
+  expect(exitCode).toBe(1);
+  expect(requests).toEqual([]);
+});
+
+test("status --help prints usage and exits 0", async () => {
+  for (const flag of ["--help", "-h"]) {
+    const { stdout, exitCode } = await molnet(["status", flag], { DEVIN_API_KEY: "" });
+    expect(stdout).toContain("Usage: molnet status");
+    expect(exitCode).toBe(0);
+  }
+  expect(requests).toEqual([]);
 });
 
 test("--help prints usage and exits 0", async () => {
