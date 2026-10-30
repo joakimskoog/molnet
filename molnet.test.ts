@@ -195,9 +195,10 @@ test("--help prints usage and exits 0", async () => {
 });
 
 test("missing or unknown command prints usage to stderr and exits 1", async () => {
-  for (const args of [[], ["nope"]]) {
-    const { stdout, stderr, exitCode } = await molnet(args);
+  for (const [args, message] of [[[], "missing command"], [["nope"], "unknown command: nope"]] as const) {
+    const { stdout, stderr, exitCode } = await molnet([...args]);
     expect(stdout).toBe("");
+    expect(stderr).toStartWith(`molnet: ${message}\n`);
     expect(stderr).toContain("Usage: molnet <command>");
     expect(exitCode).toBe(1);
   }

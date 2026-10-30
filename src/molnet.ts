@@ -2,7 +2,8 @@
 import { parseArgs } from "node:util";
 import { createDevinSessionsClient, type DevinMode, type Session, type SessionStatus, type SessionStatusDetail } from "./devin.ts";
 
-type Command = (args: string[]) => void | Promise<void>;
+/** Returns the process exit code; returning nothing means 0. */
+type Command = (args: string[]) => number | void | Promise<number | void>;
 
 const devinModes: readonly DevinMode[] = ["normal", "fast", "fusion", "lite", "ultra", "swe-2-medium", "swe-2-high", "swe-2-max"];
 
@@ -149,11 +150,10 @@ async function main([name, ...args]: string[]): Promise<number> {
   }
   const command = name ? commands[name] : undefined;
   if (!command) {
-    console.error(`${name ? `Unknown command: ${name}` : "Missing command"}\n\n${usage}`);
+    console.error(`molnet: ${name ? `unknown command: ${name}` : "missing command"}\n\n${usage}`);
     return 1;
   }
-  await command(args);
-  return 0;
+  return (await command(args)) ?? 0;
 }
 
 if (import.meta.main) {
