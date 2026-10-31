@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs } from "node:util";
+import { setTimeout as sleep } from "node:timers/promises";
 import { createDevinSessionsClient, type DevinMode, type Session, type SessionStatus, type SessionStatusDetail } from "./devin.ts";
 
 /** Returns the process exit code; returning nothing means 0. */
@@ -79,6 +80,30 @@ Fails with nothing on stdout if any lookup fails.
 Options:
   -h, --help                    Show this help`;
 
+const waitUsage = `Usage: molnet wait [options] <id>
+
+Polls the session until its state is not "working", then prints
+{"session_id","state","pull_requests"}. Silent while polling.
+The first poll is immediate; it fails with nothing on stdout if any poll fails.
+
+Exit codes: 0 idle, 1 error, 2 failed, 3 timeout (state still "working").
+
+Options:
+  --interval <seconds>          Poll every <seconds> (positive integer, default 30)
+  --timeout <seconds>           Give up after <seconds> (positive integer, default none)
+  -h, --help                    Show this help`;
+
+const maxSleepMs = 2 ** 31 - 1; // longer timers overflow and fire after 1 ms
+
+const waitExitCodes: Record<State, number> = { idle: 0, failed: 2, working: 3 };
+
+/** Parses a flag value as a positive integer, or undefined if the flag is absent. */
+function positiveInteger(name: string, value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[1-9]\d*$/.test(value)) throw new Error(`--${name} must be a positive integer, got: ${value}`);
+  return Number(value);
+}
+
 const commands: Record<string, Command> = {
   spawn: async (args) => {
     const { values, positionals } = parseArgs({
@@ -98,10 +123,7 @@ const commands: Record<string, Command> = {
     const prompt = positionals[0]!;
     if (!prompt.trim()) throw new Error("Prompt is empty");
 
-    const maxAcuLimit = values["max-acu-limit"];
-    if (maxAcuLimit !== undefined && !/^[1-9]\d*$/.test(maxAcuLimit)) {
-      throw new Error(`--max-acu-limit must be a positive integer, got: ${maxAcuLimit}`);
-    }
+    const maxAcuLimit = positiveInteger("max-acu-limit", values["max-acu-limit"]);
 
     const devinMode = values["devin-mode"] as DevinMode | undefined;
     if (devinMode !== undefined && !devinModes.includes(devinMode)) {
@@ -110,7 +132,7 @@ const commands: Record<string, Command> = {
 
     const session = await createDevinSessionsClient().createSession({
       prompt,
-      max_acu_limit: maxAcuLimit === undefined ? undefined : Number(maxAcuLimit),
+      max_acu_limit: maxAcuLimit,
       devin_mode: devinMode,
     });
     console.log(JSON.stringify({ session_id: session.session_id, url: session.url, status: session.status }));
@@ -133,6 +155,41 @@ const commands: Record<string, Command> = {
     // Build every line before printing, so one unrecognized status leaves stdout empty.
     const lines = sessions.map((session) => JSON.stringify(cloudAgentStatus(session)));
     console.log(lines.join("\n"));
+  },
+  wait: async (args) => {
+    const { values, positionals } = parseArgs({
+      args,
+      allowPositionals: true,
+      options: {
+        interval: { type: "string" },
+        timeout: { type: "string" },
+        help: { type: "boolean", short: "h" },
+      },
+    });
+    if (values.help) return console.log(waitUsage);
+
+    if (positionals.length === 0) throw new Error("wait requires a session id");
+    if (positionals.length > 1) throw new Error("wait takes one session id; run one wait per session");
+    const id = positionals[0]!;
+    if (!id.trim()) throw new Error("session id is empty");
+    const interval = positiveInteger("interval", values.interval) ?? 30;
+    const timeout = positiveInteger("timeout", values.timeout);
+
+    const client = createDevinSessionsClient();
+    const deadline = timeout === undefined ? Infinity : performance.now() + timeout * 1000;
+    let last = false; // decided before sleeping, because timers can fire a little early
+    while (true) {
+      const status = cloudAgentStatus(await client.getSession(id));
+      const remaining = deadline - performance.now();
+      // The poll at the deadline is the last one: print whatever it saw.
+      if (status.state !== "working" || last || remaining <= 0) {
+        console.log(JSON.stringify(status));
+        return waitExitCodes[status.state];
+      }
+      const sleepMs = Math.min(interval * 1000, remaining, maxSleepMs);
+      last = sleepMs === remaining;
+      await sleep(sleepMs);
+    }
   },
 };
 

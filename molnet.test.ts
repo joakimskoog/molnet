@@ -22,8 +22,18 @@ const fakeSessions: Record<string, () => Response> = {
   "s-idle": () => Response.json(fakeSession("s-idle", "running", "finished", ["https://github.com/a/b/pull/1"])),
   "s-failed": () => Response.json(fakeSession("s-failed", "suspended", "out_of_credits")),
   "s-500": () => new Response("boom", { status: 500 }),
+  "s-then-idle": sequence("s-then-idle", [["running", "working"], ["running", "waiting_for_user"]]),
+  "s-then-failed": sequence("s-then-failed", [["claimed", null], ["suspended", "out_of_quota"]]),
+  "s-idle-at-deadline": sequence("s-idle-at-deadline", [["running", "working"], ["running", "waiting_for_user"]]),
+  "s-then-weird": sequence("s-then-weird", [["running", "working"], ["sleeping", null]]),
   "s-weird": () => Response.json(fakeSession("s-weird", "sleeping", null)),
 };
+
+// Serves each state in turn, then repeats the last one.
+function sequence(id: string, states: [string, string | null][]) {
+  let polls = 0;
+  return () => Response.json(fakeSession(id, ...states[Math.min(polls++, states.length - 1)]!));
+}
 
 const server = Bun.serve({
   port: 0,
@@ -177,6 +187,106 @@ test("status --help prints usage and exits 0", async () => {
   for (const flag of ["--help", "-h"]) {
     const { stdout, exitCode } = await molnet(["status", flag], { DEVIN_API_KEY: "" });
     expect(stdout).toContain("Usage: molnet status");
+    expect(exitCode).toBe(0);
+  }
+  expect(requests).toEqual([]);
+});
+
+test("wait returns at once, with exit 0, for an idle session", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["wait", "s-idle"]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  expect(stdout).toBe('{"session_id":"s-idle","state":"idle","pull_requests":["https://github.com/a/b/pull/1"]}\n');
+  expect(requests).toEqual([{ method: "GET", path: sessionPath("s-idle"), auth: "Bearer cog_test", body: null }]);
+});
+
+test("wait returns at once, with exit 2, for a failed session", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["wait", "s-failed"]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(2);
+  expect(stdout).toBe('{"session_id":"s-failed","state":"failed","pull_requests":[]}\n');
+  expect(requests).toHaveLength(1);
+});
+
+test.concurrent("wait polls until the session is idle, silently", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["wait", "s-then-idle", "--interval", "1"]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  expect(stdout).toBe('{"session_id":"s-then-idle","state":"idle","pull_requests":[]}\n');
+});
+
+test.concurrent("wait exits 2 when the session fails while polling", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["wait", "s-then-failed", "--interval", "1"]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(2);
+  expect(stdout).toBe('{"session_id":"s-then-failed","state":"failed","pull_requests":[]}\n');
+});
+
+test.concurrent("wait prints the current status and exits 3 at the timeout, after a last poll at the deadline", async () => {
+  const start = Date.now();
+  const { stdout, stderr, exitCode } = await molnet(["wait", "s-working", "--interval", "30", "--timeout", "1"]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(3);
+  expect(stdout).toBe('{"session_id":"s-working","state":"working","pull_requests":[]}\n');
+  expect(Date.now() - start).toBeLessThan(10_000); // the 30 s sleep was cut short by the deadline
+  expect(requests.filter((r) => r.path === sessionPath("s-working"))).toHaveLength(2);
+});
+
+test.concurrent("wait exits with the real state when the poll at the deadline finds the session stopped", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["wait", "s-idle-at-deadline", "--interval", "30", "--timeout", "1"]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  expect(stdout).toBe('{"session_id":"s-idle-at-deadline","state":"idle","pull_requests":[]}\n');
+  expect(requests.filter((r) => r.path === sessionPath("s-idle-at-deadline"))).toHaveLength(2);
+});
+
+test.concurrent("wait ends on an unrecognized status seen while polling", async () => {
+  const { stdout, stderr, exitCode } = await molnet(["wait", "s-then-weird", "--interval", "1"]);
+  expect(stdout).toBe("");
+  expect(stderr).toBe("molnet: unrecognized session status sleeping/null\n");
+  expect(exitCode).toBe(1);
+});
+
+test("wait fails with nothing on stdout on an unknown id, an API error or an unrecognized status", async () => {
+  const cases: [string, string][] = [
+    ["nope-1", "failed with 403"],
+    ["s-500", "failed with 500: boom"],
+    ["s-weird", "molnet: unrecognized session status sleeping/null"],
+  ];
+  for (const [id, error] of cases) {
+    const { stdout, stderr, exitCode } = await molnet(["wait", id]);
+    expect(stdout).toBe("");
+    expect(stderr).toContain(error);
+    expect(exitCode).toBe(1);
+  }
+});
+
+test("wait validates input before calling the API", async () => {
+  const cases: [string[], string][] = [
+    [["wait"], "wait requires a session id"],
+    [["wait", ""], "session id is empty"],
+    [["wait", "  "], "session id is empty"],
+    [["wait", "s-idle", "s-working"], "wait takes one session id; run one wait per session"],
+    [["wait", "s-idle", "--interval", "0"], "--interval must be a positive integer, got: 0"],
+    [["wait", "s-idle", "--interval", "1.5"], "--interval must be a positive integer, got: 1.5"],
+    [["wait", "s-idle", "--interval", "abc"], "--interval must be a positive integer, got: abc"],
+    [["wait", "s-idle", "--timeout", "0"], "--timeout must be a positive integer, got: 0"],
+    [["wait", "s-idle", "--timeout=-5"], "--timeout must be a positive integer, got: -5"],
+    [["wait", "s-idle", "--nope"], "Unknown option '--nope'"],
+  ];
+  for (const [args, error] of cases) {
+    const { stdout, stderr, exitCode } = await molnet(args);
+    expect(stdout).toBe("");
+    expect(stderr).toContain(error);
+    expect(exitCode).toBe(1);
+  }
+  expect(requests).toEqual([]);
+});
+
+test("wait --help prints usage and exits 0", async () => {
+  for (const flag of ["--help", "-h"]) {
+    const { stdout, exitCode } = await molnet(["wait", flag], { DEVIN_API_KEY: "" });
+    expect(stdout).toContain("Usage: molnet wait");
     expect(exitCode).toBe(0);
   }
   expect(requests).toEqual([]);
